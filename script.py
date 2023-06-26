@@ -8,26 +8,28 @@ import cv2 as cv
 from tkinter import *
 from PIL import Image, ImageTk
 
-from classes import Session, Processor, Highlighter, Pencil
+from classes import Session, Processor, Highlighter, Pencil, Text
 
 tools = {
     'highlight': {
         "icon": "./icons/highlight.png",
         "class": Highlighter,
+        "export_layer": "behind"
     },
     'pencil': {
         "icon": "./icons/pencil.png",
         "class": Pencil,
+        "export_layer": "above"
     },
     'text': {
-        "icon": "./icons/text.png"
+        "icon": "./icons/text.png",
+        "class": Text,
+        "export_layer": "above"
     },
-    'eraser': {
-        "icon": "./icons/eraser.png"
-    },
+    # 'eraser': {
+    #     "icon": "./icons/eraser.png"
+    # },
 }
-
-highlighter = Highlighter()
 
 def log_data(data):
     if len(data) == 0: return 'no types present'
@@ -49,6 +51,9 @@ def log_data(data):
     return message
 
 # FIXME: Highlight rectangles can only be created from the top left
+# FIXME: Exporting on last page removes pencil lines
+# FIXME: Exported pencil lines connect start and end points
+
 # TODO: Zoom out of large images to achieve an editable window size (*)
 # TODO: Add save functionality (*)
 # TODO: Retain history between pages (*)
@@ -66,7 +71,8 @@ def log_data(data):
 
 pdf = 'file.pdf'
 
-images = convert_from_path(pdf)
+# images = convert_from_path(pdf)
+images = convert_from_path(pdf)[0:2]
 print(f'Got {len(images)} image(s)')
 
 rects = []
@@ -95,6 +101,20 @@ image = None
 
 print('Initialized')
 
+def update_canvas():
+    canvas.delete('all')
+
+    for item in data:
+        tools[item["type"]]["class"].render(canvas, item["info"])
+        
+    canvas.create_image(0,0, anchor=NW, image=image) # Page image
+
+    session.change_data(page, data)
+
+def initialize_tool(reference):
+    global canvas
+    return reference(canvas, update_canvas)
+
 def on_tool_change(new_tool):
     global current_tool
     global active_class
@@ -105,13 +125,22 @@ def on_tool_change(new_tool):
     else:
         print(f'Changed tool from {current_tool} to {new_tool}')
         current_tool = new_tool
-        active_class = tools[new_tool]["class"]()
-        active_class.set_canvas(canvas)
-
+        active_class = initialize_tool(tools[new_tool]["class"])
 
 def log_history():
     for i in range(len(history)):
         print(f'Page {i + 1}: {log_data(history[i])}')
+
+
+def get_tool_layers():
+    print(list(tools.items()))
+
+    for thing in list(tools.items()):
+        print(thing[1])
+    behind = list(map(lambda e: e[0], filter(lambda e: e[1]["export_layer"] == "behind", list(tools.items()))))
+    above = list(map(lambda e: e[0], filter(lambda e: e[1]["export_layer"] == "above", list(tools.items()))))
+
+    return [behind, above]
 
 def export():
     doc = fitz.open()
@@ -120,30 +149,21 @@ def export():
         image = processor.get_image(i)
 
         (height, width, _) = image.shape
-        scale = 1 / min(721 / width, 1020 / height)
 
         page = doc.new_page(-1,
                             width = width,
                             height = height)
         
 
+        behind_tools, above_tools = get_tool_layers()
 
-        for rect_data in history[i]:
-            x0, y0, x1, y1 = rect_data
-            x0 *= scale
-            y0 *= scale
-            x1 *= scale
-            y1 *= scale
+        behind = list(filter(lambda e: e["type"] in behind_tools, history[i]))
+        above = list(filter(lambda e: e["type"] in above_tools, history[i]))
 
-            rect = fitz.Rect(x0, y0, x1, y1)
-
-            shape = page.new_shape()
-            shape.draw_rect(rect)
-            shape.finish(width = 0.3, color = (1, 0, 0), fill = (1, 1, 0))
-            shape.commit()
+        for cluster in behind:
+            tools[cluster["type"]]["class"].export_render(fitz, page, image, cluster["info"])
 
         image_rect = fitz.Rect(0, 0, width, height)
-
 
         _, buffer = cv.imencode('.png', image)
         byte_array = np.array(buffer).tobytes()
@@ -151,6 +171,10 @@ def export():
         pixmap = fitz.Pixmap(byte_array)
 
         page.insert_image(image_rect, pixmap=pixmap) 
+
+        for cluster in above:
+            tools[cluster["type"]]["class"].export_render(fitz, page, image, cluster["info"])
+            
 
 
     doc.save('exported.pdf')
@@ -190,28 +214,13 @@ def update_all():
     print(f'Created image')
 
 
-
-def update_canvas():
-    canvas.delete('all')
-
-    for item in data:
-        tools[item["type"]]["class"].render(canvas, item["info"])
-        
-    canvas.create_image(0,0, anchor=NW, image=image) # Page image
-
-    # line = canvas.create_line(100,200,200,35, fill="green", width=5)
-    # print(canvas.coords(line))
-
-    session.change_data(page, data)
-
 def motion(event):
     if not active: return
     if not holding: return
 
     global data
 
-    # TODO: Make update_canvas a parameter
-    active_class.on_move(event.x, event.y, data, update_canvas, right=(event.state == 1024))
+    active_class.on_move(event.x, event.y, data, right=(event.state == 1024))
 
 def on_press(event):
     global holding
@@ -322,9 +331,7 @@ def new_session():
     # initialize_sessions()
 
     active = True
-    active_class = tools[current_tool]["class"]()
-    active_class.set_canvas(canvas)
-
+    active_class = initialize_tool(tools[current_tool]["class"])
 
     update_all()
     
@@ -347,7 +354,7 @@ def fill_frame():
         frame = Frame(second_frame, highlightbackground="white", highlightthickness=2, bg="#262626", width=1100, height=80)
         frame.grid(row=4 + i, column=0, pady=10)
 
-        label = Label(frame, text=f'Session {sessions[i]["id"]} - {i}', font=("Arial", 20), bg='#262626', fg='white')
+        label = Label(frame, text=f'Session {sessions[i]["id"]} - {sessions[i]["file"]}', font=("Arial", 20), bg='#262626', fg='white')
         label.place(relx=0, rely=0.5, anchor='w', x=10)
 
         button = Button(frame, text="Enter session", command=lambda i=i: enter_session(i), font=("Arial", 15), width=13)
@@ -369,8 +376,7 @@ def enter_session(number):
     session = Session(_id=sessions[number]["id"])
 
     active = True
-    active_class = tools[current_tool]["class"]()
-    active_class.set_canvas(canvas)
+    active_class = initialize_tool(tools[current_tool]["class"])
 
     history = sessions[number]["data"]
     data = history[0]
@@ -440,6 +446,10 @@ for i in range(len(tools.items())):
     image.image = icon  # <== this is were we anchor the img object
     image.configure(image=icon, command=lambda btn=image, i=i: button_click(btn, i))
     image.place(anchor='nw', height=32, width=32, y=i*32)
+
+    if current_tool == list(tools.keys())[i]:
+        white_icon = tool_images[i + 4]
+        image.config(bg="black", fg="white", image=white_icon)
 
     buttons.append(image)
 

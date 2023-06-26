@@ -130,16 +130,19 @@ class Session:
 
         Session.set(sessions)
 
-class Highlighter:
-    def __init__(self):
-        self.canvas = None
+class Tool:
+    def __init__(self, canvas, update):
+        self.canvas = canvas
+        self.update = update
+
+class Highlighter(Tool):
+    def __init__(self, canvas, update):
+        super().__init__(canvas, update)
+
         self.rectangle = None
         self.origin = [0, 0]
         self.name = "highlight"
         
-    def set_canvas(self, canvas):
-        self.canvas = canvas
-
     def on_press(self, x, y, right=False):
         if right: return
 
@@ -147,7 +150,7 @@ class Highlighter:
         self.canvas.coords(self.rectangle, x, y, x, y)
         self.origin = [x, y]
 
-    def on_move(self, xm, ym, data, update, right=False):
+    def on_move(self, xm, ym, data, right=False):
         if right: return
 
         x, y = self.origin
@@ -182,17 +185,34 @@ class Highlighter:
         x0, y0, x1, y1 = info
         canvas.create_rectangle(x0, y0, x1, y1, fill="yellow", outline="red")
 
-class Pencil:
-    def __init__(self):
-        self.canvas = None
+    @staticmethod
+    def export_render(engine, page, image, info):
+        (height, width, _) = image.shape
+
+        scale = 1 / min(721 / width, 1020 / height)
+
+        x0, y0, x1, y1 = info
+        x0 *= scale
+        y0 *= scale
+        x1 *= scale
+        y1 *= scale
+
+        rect = engine.Rect(x0, y0, x1, y1)
+
+        shape = page.new_shape()
+        shape.draw_rect(rect)
+        shape.finish(width = 0.3, color = (1, 0, 0), fill = (1, 1, 0))
+        shape.commit()
+
+class Pencil(Tool):
+    def __init__(self, canvas, update):
+        super().__init__(canvas, update)
+
         self.rectangle = None
         self.drawing = None
         self.removing = []
         self.name = "pencil"
         
-    def set_canvas(self, canvas):
-        self.canvas = canvas
-
     def on_press(self, x, y, right=False):
         if right: return
 
@@ -202,7 +222,7 @@ class Pencil:
 
         self.canvas.create_line(x, y, x, y, fill="black", width=1)
 
-    def on_move(self, xm, ym, data, update, right=False):
+    def on_move(self, xm, ym, data, right=False):
         if right:
             splines = list(filter(lambda e: e[1]["type"] == "pencil", list(enumerate(data))))
             offset = 10
@@ -226,7 +246,19 @@ class Pencil:
 
             if len(old) != len(self.removing):
                 data[:] = list(map(lambda e: e[1] if e[0] not in self.removing else self.blur_spline(e[1]), list(enumerate(data))))
-                update()
+                self.update()
+
+            return
+
+        x0, y0, x1, y1, _ = self.drawing[-1]
+
+        self.drawing.append([x1, y1, xm, ym, 1])
+        self.canvas.create_line(x1, y1, xm, ym, fill="black", width=1)
+
+    def on_release(self, xm, ym, data, right=False):
+        if right:
+            data[:] = list(map(lambda e: e[1], filter(lambda e: e[0] not in self.removing, list(enumerate(data)))))
+            self.removing = []
 
             return
 
@@ -236,18 +268,54 @@ class Pencil:
 
         self.canvas.create_line(x1, y1, xm, ym, fill="black", width=1)
 
-    def on_release(self, xm, ym, data, right=False):
-        if not right:
-            x0, y0, x1, y1, _ = self.drawing[-1]
+        self.drawing = self.simplify(self.drawing)
+        # self.simplify(self.drawing)
+        data.append({ "type": self.name, "info": self.get_info() })   
 
-            self.drawing.append([x1, y1, xm, ym, 1])
+    def simplify(self, lines):
+        points = list(map(lambda e: [e[0], e[1]], lines))
+        print(points)
 
-            self.canvas.create_line(x1, y1, xm, ym, fill="black", width=1)
+        threshold = 1.5
+        previous_slope = None
 
-            data.append({ "type": self.name, "info": self.get_info() })   
-        else:
-            data[:] = list(map(lambda e: e[1], filter(lambda e: e[0] not in self.removing, list(enumerate(data)))))
-            self.removing = []
+        indices = []
+
+        for i in range(0, len(points) - 1):
+            slope = self.get_slope(points[i], points[i + 1])
+
+            if previous_slope == None:
+                previous_slope = slope
+                continue            
+            
+            if previous_slope == 'vertical' or slope == 'vertical':
+                if previous_slope == slope:
+                    indices.append(i)
+            else:
+                if abs(slope - previous_slope) <= threshold:
+                    indices.append(i)
+
+            previous_slope = slope
+
+        points = list(map(lambda e: e[1], filter(lambda e: e[0] not in indices, list(enumerate(points)))))
+
+        for i in range(0, len(points) - 1):
+            p1 = points[i]
+            p2 = points[i + 1]
+
+            points[i] = [p1[0], p1[1], p2[0], p2[1], 1]
+
+        points[-1] = [points[-1][0], points[-1][1], points[-1][0], points[-1][1], 1]
+
+        return points
+
+    def get_slope(self, point1, point2):
+        x0, y0 = point1
+        x1, y1 = point2
+
+        if x0 - x1 == 0: return 'vertical'
+        
+        return y1-y0/x1-x0
 
     def get_info(self):
         return self.drawing
@@ -263,56 +331,41 @@ class Pencil:
         for x0, y0, x1, y1, alpha in info:
             canvas.create_line(x0, y0, x1, y1, fill="black" if alpha == 1 else "red", width=1)
 
+    @staticmethod
+    def export_render(engine, page, image, info):
+        (height, width, _) = image.shape
+
+        scale = 1 / min(721 / width, 1020 / height)
+
+        points = list(map(lambda e: [e[0] * scale, e[1] * scale], info))
+        shape = page.new_shape()
+        shape.draw_polyline(points)
+        shape.finish(width = 0.3, color = (0, 0, 0), fill = (1, 1, 1), fill_opacity=0)
+        shape.commit()
 
 
-# class HighlighterJohn:
-#     def __init__(self):
-#         self.canvas = None
-#         self.rectangle = None
-#         self.origin = [0, 0]
-#         self.name = "pencil"
+class Text(Tool):
+    def __init__(self, canvas, update):
+        super().__init__(canvas, update)
+
+        self.name = "text"
         
-#     def set_canvas(self, canvas):
-#         self.canvas = canvas
+    def on_press(self, x, y, right=False):
+        pass
 
-#     def on_press(self, x, y, right=False):
-#         if right: return
+    def on_move(self, xm, ym, data, right=False):
+        pass
 
-#         self.rectangle = self.canvas.create_rectangle(0, 0, 0, 0, fill="", outline="red")
-#         self.canvas.coords(self.rectangle, x, y, x, y)
-#         self.origin = [x, y]
+    def on_release(self, xm, ym, data, right=False):
+        pass
 
-#     def on_move(self, xm, ym, right=False):
-#         if right: return
+    def get_info(self):
+        return None
 
-#         x, y = self.origin
+    @staticmethod
+    def render(canvas, info):
+        pass
 
-#         self.canvas.coords(self.rectangle, min(xm, x), min(ym, y), max(xm, x), max(ym, y))
-
-#     def on_release(self, xm, ym, data, right=False):
-#         if not right:
-#             x, y = self.origin
-#             self.canvas.coords(self.rectangle, min(xm, x), min(ym, y), max(xm, x), max(ym, y))
-#             data.append({ "type": self.name, "info": self.get_info() })    
-#         else:
-#             # Find the first item that is a highlight rectangle which also encompasses the current release mouse position
-#             # The enumerated list is reversed to maintain layer order
-#             result = next((item for item in reversed(list(enumerate(data))) if item[1]["type"] == self.name and self.inside_rect((xm, ym), item[1]["info"])), None)
-#             index = result[0] if result != None else -1
-
-#             if index == -1: return
-        
-#             del data[index]
-
-#     def get_info(self):
-#         return self.canvas.coords(self.rectangle)
-
-#     def inside_rect(self, point, rect):
-#         x0, y0, x1, y1 = rect
-#         x, y = point
-#         return x >= x0 and x <= x1 and y >= y0 and y <= y1
-
-#     @staticmethod
-#     def render(canvas, info):
-#         x0, y0, x1, y1 = info
-#         canvas.create_rectangle(x0, y0, x1, y1, fill="blue", outline="black")
+    @staticmethod
+    def export_render(engine, page, image, info):
+        pass
